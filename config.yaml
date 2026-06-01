@@ -1,0 +1,38 @@
+# config.yaml — all hardcoded values
+
+# ---------------------------------------------------------------------------
+# Cluster settings
+# ---------------------------------------------------------------------------
+namespace: "default"          # namespace to watch
+poll_interval: 10             # time in seconds between cluster polls
+
+# ---------------------------------------------------------------------------
+# Anomaly detection thresholds
+# ---------------------------------------------------------------------------
+pending_duration_seconds: 60  # intial seconds before flagging it as anomaly
+restart_count_threshold: 3    # Restart count after which it is considered HighRestartCount
+
+# ---------------------------------------------------------------------------
+# Cooldown settings
+# ---------------------------------------------------------------------------
+cooldown_window_seconds: 300  # cooldown time before taking action on the same issue on same pod
+cooldown_max_attempts: 3      # Max attempts before flagging the issue as alert-only
+
+# ---------------------------------------------------------------------------
+# LLM / Ollama settings
+# ---------------------------------------------------------------------------
+ollama_base_url: "http://localhost:11434/v1"
+model: "qwen2.5:7b"
+max_iterations: 6             # Max agent reasoning rounds before giving up
+max_tokens: 1000              # Max tokens per Ollama response
+
+# ---------------------------------------------------------------------------
+# Display settings
+# ---------------------------------------------------------------------------
+log_tail_size: 10             # Number of tail of agent log lines to display
+
+# ---------------------------------------------------------------------------
+# Logging settings
+# ---------------------------------------------------------------------------
+log_file: "logs/agent.log"    # Path to log file
+log_level: "INFO"             # DEBUG, INFO, WARNING, ERROR
