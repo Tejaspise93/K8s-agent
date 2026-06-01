@@ -16,7 +16,11 @@ operator before acting. Everything runs locally -- no external API calls, no clo
 
 
 
-https://github.com/user-attachments/assets/6f3d2d0c-e2fd-4297-bc5a-c4406e7f9040
+
+
+https://github.com/user-attachments/assets/ccb4ae0b-a34d-4313-8803-08a24c0fc8f0
+
+
 
 
 
