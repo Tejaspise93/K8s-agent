@@ -2,6 +2,7 @@ import time
 import sys
 from agent.watcher import connect_to_cluster, get_pod_snapshot, detect_anomalies
 from agent.agent import run_agent, ask_user_confirmation
+from agent.tools import restart_pod, scale_deployment, rollback_deployment
 from agent.cooldown import CooldownTracker
 from agent.utils import get_deployment_name
 from agent.display import init_display, render_screen, log_event, show_confirmation_screen
@@ -56,8 +57,6 @@ def handle_decision(anomaly, decision):
 
 def execute_decision(decision):
     """Call the appropriate tool based on the agent's decision."""
-    from agent.tools import restart_pod, scale_deployment, rollback_deployment
-    from agent.utils import get_deployment_name
 
     action = decision.get("action")
     target = decision.get("target")

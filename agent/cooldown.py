@@ -80,11 +80,12 @@ class CooldownTracker:
         Call this immediately after executing any action.
         """
         key = (pod_name, action)
+        now = datetime.now()
 
         if key not in self._records:
-            self._records[key] = {"timestamp": datetime.now(), "attempts": 1}
+            self._records[key] = {"timestamp": now, "attempts": 1}
         else:
-            self._records[key]["timestamp"] = datetime.now()
+            self._records[key]["timestamp"] = now
             self._records[key]["attempts"] += 1
 
     def get_attempts(self, pod_name: str, action: str) -> int:

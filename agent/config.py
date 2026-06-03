@@ -4,15 +4,14 @@ config.py -- Loads config.yaml and exposes settings.
 Usage:
     from agent.config import cfg
     print(cfg.namespace)
-
 """
 
 import yaml
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Config dataclass -- one field per setting, typed
+# Config dataclass
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -48,11 +47,7 @@ class Config:
 # ---------------------------------------------------------------------------
 
 def _load_config() -> Config:
-    """
-    Read config.yaml from the root and return a Config instance.
-    Raises a clear error if the file is missing or a required key is absent.
-    """
-    # config.yaml sits at the project root -- one level above agent/
+    """Read config.yaml and return a typed Config instance."""
     config_path = Path(__file__).parent.parent / "config.yaml"
 
     if not config_path.exists():
@@ -62,30 +57,33 @@ def _load_config() -> Config:
         )
 
     with open(config_path, "r") as f:
-        raw = yaml.safe_load(f)
+        raw = yaml.safe_load(f) or {}
 
     try:
-        return Config(
-            namespace                = raw["namespace"],
-            poll_interval            = int(raw["poll_interval"]),
-            pending_duration_seconds = int(raw["pending_duration_seconds"]),
-            restart_count_threshold  = int(raw["restart_count_threshold"]),
-            cooldown_window_seconds  = int(raw["cooldown_window_seconds"]),
-            cooldown_max_attempts    = int(raw["cooldown_max_attempts"]),
-            ollama_base_url          = raw["ollama_base_url"],
-            model                    = raw["model"],
-            max_iterations           = int(raw["max_iterations"]),
-            max_tokens               = int(raw["max_tokens"]),
-            log_tail_size            = int(raw["log_tail_size"]),
-            log_file                 = raw["log_file"],
-            log_level                = raw["log_level"],
-        )
+        # Dynamically parse and cast fields based on dataclass annotations
+        casted_data = {}
+        for field in fields(Config):
+            val = raw[field.name]
+            # Convert type if necessary (e.g., str to int)
+            casted_data[field.name] = field.type(val) if val is not None else val
+            
+        config_obj = Config(**casted_data)
+
+        assert config_obj.poll_interval > 0,        "poll_interval must be > 0"
+        assert config_obj.max_iterations > 0,       "max_iterations must be > 0"
+        assert config_obj.cooldown_max_attempts > 0, "cooldown_max_attempts must be > 0"
+        assert config_obj.max_tokens >= 100,        "max_tokens too low -- set at least 100"
+
+        return config_obj
+        
     except KeyError as e:
         raise KeyError(f"Missing required config key: {e}. Check config.yaml.")
+    except (ValueError, TypeError) as e:
+        raise ValueError(f"Invalid value type in config.yaml: {e}")
 
 
 # ---------------------------------------------------------------------------
-# Module-level singleton -- import this everywhere
+# Module-level singleton
 # ---------------------------------------------------------------------------
 
 cfg = _load_config()
