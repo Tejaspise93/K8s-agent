@@ -27,9 +27,6 @@ from agent.tools import (
     get_resource_usage,
     get_resource_limits,
     get_deployment_status,
-    restart_pod,
-    scale_deployment,
-    rollback_deployment,
 )
 
 # ---------------------------------------------------------------------------
@@ -45,6 +42,19 @@ MODEL          = cfg.model
 # Maximum number of tool model calls before we give up.
 # Stops if the model is stuck in taking decisions
 MAX_ITERATIONS = cfg.max_iterations
+
+
+def check_ollama_health() -> None:
+    """
+    Checks Ollama server is available before starting.
+    """
+    try:
+        ollama_client.models.list()
+    except Exception as e:
+        raise ConnectionError(
+            f"Cannot reach Ollama at {cfg.ollama_base_url}: {e}\n"
+            "Make sure Ollama is running (ollama serve) and the URL in config.yaml is correct."
+        )
 
 # ---------------------------------------------------------------------------
 # Tool definitions -- setting tools so LLM knows what tools exist
@@ -159,9 +169,6 @@ TOOL_FUNCTIONS = {
     "get_resource_usage": get_resource_usage,
     "get_resource_limits": get_resource_limits,
     "get_deployment_status": get_deployment_status,
-    "restart_pod": restart_pod,
-    "scale_deployment": scale_deployment,
-    "rollback_deployment": rollback_deployment,
 }
 
 # ---------------------------------------------------------------------------
@@ -192,7 +199,10 @@ TARGET RULES:
 - If you are not fixing anything: action is "none"
 
 OUTPUT FORMAT -- valid JSON only, nothing else:
-{"confidence":"HIGH","action":"restart_pod","target":"exact-pod-name","namespace":"default","reasoning":"specific one sentence explanation based on what logs showed","recommendation":"optional operator tip"}
+{"confidence":"HIGH","action":"restart_pod","target":"exact-pod-name","namespace":"default","reasoning":"one sentence explanation based on what logs showed","recommendation":"optional operator tip"}
+
+For scale_deployment, include the desired replica count:
+{"confidence":"HIGH","action":"scale_deployment","target":"deployment-name","namespace":"default","replicas":3,"reasoning":"explanation","recommendation":"tip"}
 """
 
 # ---------------------------------------------------------------------------
@@ -323,8 +333,8 @@ def run_agent(anomaly, callback=None):
                 # tool_choice="auto" lets the model decide whether to call a tool
                 # or give a final text response
                 tool_choice="auto",
-                # Keep max_tokens reasonable -- we're on CPU, large responses are slow
                 max_tokens=cfg.max_tokens,
+                timeout=120,  # 2-minute ceiling per LLM call -- prevents indefinite hangs
             )
         except Exception as e:
             emit("error", f"Ollama API error: {str(e)}")
@@ -395,7 +405,7 @@ def run_agent(anomaly, callback=None):
             # Continue the loop -- model will read the tool results next iteration
             continue
 
-# --- No tool call -- model gave a text response ---
+        # --- No tool call -- model gave a text response ---
         response_text = message.content or ""
 
         decision = parse_final_decision(response_text)

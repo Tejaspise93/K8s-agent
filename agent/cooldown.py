@@ -3,9 +3,17 @@ cooldown.py -- Prevents the agent from repeating the same action on the same res
 
 Tracks every action taken, blocks repeats within a cooldown window,
 and escalates to alert-only after too many failed attempts.
+
+State is stored in logs/cooldown_state.json so cooldowns survive restarts.
 """
 
+import json
 from datetime import datetime, timedelta
+from pathlib import Path
+
+
+# Cooldown state is saved alongside log files
+_COOLDOWN_FILE = Path(__file__).parent.parent / "logs" / "cooldown_state.json"
 
 
 class CooldownTracker:
@@ -21,8 +29,8 @@ class CooldownTracker:
     Rules:
         1. Same action on same pod within window_seconds   -> BLOCKED
         2. Same action on same pod exceeds max_attempts    -> alert only
-        3. Different action on same pod                    -> ALLOWED (ex. restarts the pod for some issue that didn't fix the issue, 
-                                                      after restarts reach restart_count_threshold it checks for high restart issue)
+        3. Different action on same pod                    -> ALLOWED (ex. restarts the pod for some issue that didn't fix the issue,
+                                                       after restarts reach restart_count_threshold it checks for high restart issue)
     """
 
     def __init__(self, window_seconds: int = 300, max_attempts: int = 3):
@@ -40,6 +48,9 @@ class CooldownTracker:
 
         # Key: (pod_name, action) -> {"timestamp": datetime, "attempts": int}
         self._records: dict[tuple[str, str], dict] = {}
+
+        # Load persisted state from previous run
+        self._load()
 
     # ------------------------------------------------------------------
     # Public interface
@@ -88,6 +99,8 @@ class CooldownTracker:
             self._records[key]["timestamp"] = now
             self._records[key]["attempts"] += 1
 
+        self._save()
+
     def get_attempts(self, pod_name: str, action: str) -> int:
         """Return how many times this action has been taken on this pod."""
         key = (pod_name, action)
@@ -101,10 +114,12 @@ class CooldownTracker:
         key = (pod_name, action)
         if key in self._records:
             del self._records[key]
+            self._save()
 
     def reset_all(self) -> None:
         """Clear all cooldown records. Useful for testing."""
         self._records.clear()
+        self._save()
 
     def status(self) -> list[dict]:
         """
@@ -129,3 +144,55 @@ class CooldownTracker:
             })
 
         return result
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+
+    def _load(self) -> None:
+        """Load cooldown state from disk. Cleans up stale non-escalated entries."""
+        if not _COOLDOWN_FILE.exists():
+            return
+
+        try:
+            with open(_COOLDOWN_FILE, "r") as f:
+                data = json.load(f)
+
+            now = datetime.now()
+            for entry in data:
+                key = (entry["pod"], entry["action"])
+                timestamp = datetime.fromisoformat(entry["timestamp"])
+                attempts = entry["attempts"]
+
+                # Skip expired non-escalated entries -- they're truly stale
+                elapsed = now - timestamp
+                if elapsed > timedelta(seconds=self.window_seconds) and attempts < self.max_attempts:
+                    continue
+
+                self._records[key] = {
+                    "timestamp": timestamp,
+                    "attempts": attempts,
+                }
+
+        except (json.JSONDecodeError, KeyError, ValueError):
+            # Corrupted file -- start fresh
+            self._records.clear()
+
+    def _save(self) -> None:
+        """Persist current cooldown state to disk. Best-effort -- failures are silent."""
+        try:
+            data = []
+            for (pod_name, action), record in self._records.items():
+                data.append({
+                    "pod": pod_name,
+                    "action": action,
+                    "timestamp": record["timestamp"].isoformat(),
+                    "attempts": record["attempts"],
+                })
+
+            _COOLDOWN_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(_COOLDOWN_FILE, "w") as f:
+                json.dump(data, f, indent=2)
+
+        except OSError:
+            pass  # Persistence is best-effort; agent continues working

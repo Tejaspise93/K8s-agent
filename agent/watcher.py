@@ -11,6 +11,7 @@ from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 from datetime import datetime
 from agent.config import cfg
+from agent.utils import parse_container_statuses
 
 
 def connect_to_cluster():
@@ -72,41 +73,10 @@ def get_pod_snapshot(core_api, namespace="default"):
         # Node this pod is scheduled on (None if still Pending)
         node = pod.spec.node_name or "unscheduled"
 
-        # --- Extract container-level details ---
-        # A pod can have multiple containers. We look at all of them and
-        # take the worst values (highest restarts, any abnormal exit reason).
-        total_restarts = 0
-        exit_reason = None
-        all_ready = True
-
-        if pod.status.container_statuses:
-            for cs in pod.status.container_statuses:
-                # Accumulate restart counts across all containers in the pod
-                total_restarts += cs.restart_count or 0
-
-                # ready=False means this container isn't passing its readiness probe
-                if not cs.ready:
-                    all_ready = False
-
-                # The current state is a ContainerState object with three possible
-                # sub-fields: running, waiting, terminated -- only one is set at a time.
-                state = cs.state
-
-                if state.waiting and state.waiting.reason:
-                    # CrashLoopBackOff and other waiting reasons live here
-                    exit_reason = state.waiting.reason
-
-                elif state.terminated and state.terminated.reason:
-                    # OOMKilled, Error, Completed -- live here
-                    exit_reason = state.terminated.reason
-
-                # Also check last_state -- this captures the reason from the
-                # *previous* run of the container, which persists even after restart.
-                # Without this, OOMKilled would disappear once the pod restarts.
-                if cs.last_state and cs.last_state.terminated:
-                    last = cs.last_state.terminated
-                    if last.reason and not exit_reason:
-                        exit_reason = last.reason
+        # Extract container-level details using the shared helper
+        total_restarts, all_ready, exit_reason = parse_container_statuses(
+            pod.status.container_statuses
+        )
 
         pods.append({
             "name": name,

@@ -1,7 +1,7 @@
 import time
 import sys
 from agent.watcher import connect_to_cluster, get_pod_snapshot, detect_anomalies
-from agent.agent import run_agent, ask_user_confirmation
+from agent.agent import run_agent, ask_user_confirmation, check_ollama_health
 from agent.tools import restart_pod, scale_deployment, rollback_deployment
 from agent.cooldown import CooldownTracker
 from agent.utils import get_deployment_name
@@ -17,8 +17,7 @@ cooldown      = CooldownTracker(
 )
 
 
-def display_callback(event_type, message):
-    log_event(event_type, message)
+
 
 
 def handle_decision(anomaly, decision):
@@ -77,7 +76,8 @@ def execute_decision(decision):
         log_event("decision", f"restart_pod -> {result.get('result')} -- {result.get('note')}")
 
     elif action == "scale_deployment":
-        result = scale_deployment(target, namespace, replicas=2)
+        replicas = decision.get("replicas", 2)
+        result = scale_deployment(target, namespace, replicas=replicas)
         log_event("decision", f"scale_deployment -> {result.get('result')} -- {result.get('note')}")
 
     elif action == "rollback_deployment":
@@ -93,6 +93,7 @@ def run_app():
 
     try:
         core_api = connect_to_cluster()
+        check_ollama_health()
         init_display(namespace=NAMESPACE, poll_interval=POLL_INTERVAL)
         write("INFO", f"Monitor started -- watching namespace: {NAMESPACE}, poll interval: {POLL_INTERVAL}s")
         print(f"Connected. Watching namespace: '{NAMESPACE}'")
@@ -125,7 +126,7 @@ def run_app():
 
                 cooldown.record(stable_name, f"investigate_{atype}")
                 log_event("investigating", f"Sending {pod} to agent")
-                decision = run_agent(anomaly, callback=display_callback)
+                decision = run_agent(anomaly, callback=log_event)
                 handle_decision(anomaly, decision)
 
             time.sleep(POLL_INTERVAL)

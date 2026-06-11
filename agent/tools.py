@@ -11,17 +11,32 @@ Strings are used for error messages so the model can reason about failures too.
 
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
+from agent.utils import parse_container_statuses
 
 
-def _get_clients():
+# ---------------------------------------------------------------------------
+# Client factory -- kubeconfig is loaded once, clients are created per-call
+# ---------------------------------------------------------------------------
+
+_kube_config_loaded: bool = False
+
+
+def _ensure_kube_config() -> None:
+    """Load kubeconfig once. Subsequent calls are no-ops."""
+    global _kube_config_loaded
+    if not _kube_config_loaded:
+        config.load_kube_config()
+        _kube_config_loaded = True
+
+
+def _get_clients() -> tuple[client.CoreV1Api, client.AppsV1Api]:
     """
-    Internal helper -- returns connected K8s API clients.
-    Called at the start of every tool function so each call gets a fresh client.
+    Returns connected K8s API clients.
     two API groups:
       - CoreV1Api: pods, namespaces, events, nodes
       - AppsV1Api: deployments, replicasets
     """
-    config.load_kube_config()
+    _ensure_kube_config()
     core = client.CoreV1Api()
     apps = client.AppsV1Api()
     return core, apps
@@ -31,7 +46,7 @@ def _get_clients():
 # READ TOOLS -- gather information, no cluster changes
 # ---------------------------------------------------------------------------
 
-def get_cluster_state(namespace="default"):
+def get_cluster_state(namespace: str = "default") -> dict | str:
     """
     Tool 1 -- Snapshot of all pods in the namespace.
     Returns a list of dicts, one per pod.
@@ -46,26 +61,14 @@ def get_cluster_state(namespace="default"):
 
     pods = []
     for pod in pod_list.items:
-        # Extract restart count and exit reason across all containers
-        restarts = 0
-        reason = None
-
-        if pod.status.container_statuses:
-            for cs in pod.status.container_statuses:
-                restarts += cs.restart_count or 0
-
-                if cs.state.waiting and cs.state.waiting.reason:
-                    reason = cs.state.waiting.reason
-                elif cs.state.terminated and cs.state.terminated.reason:
-                    reason = cs.state.terminated.reason
-                # Check previous run for OOMKilled etc.
-                if cs.last_state and cs.last_state.terminated and not reason:
-                    reason = cs.last_state.terminated.reason
+        restarts, ready, reason = parse_container_statuses(
+            pod.status.container_statuses
+        )
 
         pods.append({
             "name": pod.metadata.name,
             "phase": pod.status.phase or "Unknown",
-            "ready": all(cs.ready for cs in (pod.status.container_statuses or [])),
+            "ready": ready,
             "restarts": restarts,
             "reason": reason,
             "node": pod.spec.node_name or "unscheduled",
@@ -74,7 +77,7 @@ def get_cluster_state(namespace="default"):
     return {"namespace": namespace, "pod_count": len(pods), "pods": pods}
 
 
-def get_pod_logs(pod_name, namespace="default", tail_lines=50):
+def get_pod_logs(pod_name: str, namespace: str = "default", tail_lines: int = 50) -> dict | str:
     """
     Tool 2 -- Fetch the last N lines of logs from a pod.
     tail_lines=50 keeps the response small enough for the LLM context window.
@@ -100,7 +103,7 @@ def get_pod_logs(pod_name, namespace="default", tail_lines=50):
         return f"Error fetching logs for {pod_name}: {e.status} {e.reason}"
 
 
-def get_pod_events(pod_name, namespace="default"):
+def get_pod_events(pod_name: str, namespace: str = "default") -> dict | str:
     """
     Tool 3 -- Fetch Kubernetes events related to a specific pod.
 
@@ -136,17 +139,17 @@ def get_pod_events(pod_name, namespace="default"):
     }
 
 
-def get_resource_usage(pod_name, namespace="default"):
+def get_resource_usage(pod_name: str, namespace: str = "default") -> dict | str:
     """
     Tool 4 -- Live CPU and memory usage from the metrics server.
 
-    This is needed to diagnose OOMKilled and high CPU -- 
+    This is needed to diagnose OOMKilled and high CPU --
     see exactly how close the container is to its limit.
 
     Uses the CustomObjectsApi because metrics are not part of the core K8s API --
     they live in the metrics.k8s.io API group.
     """
-    config.load_kube_config()
+    _ensure_kube_config()
     custom = client.CustomObjectsApi()
 
     try:
@@ -182,7 +185,7 @@ def get_resource_usage(pod_name, namespace="default"):
     }
 
 
-def get_resource_limits(pod_name, namespace="default"):
+def get_resource_limits(pod_name: str, namespace: str = "default") -> dict | str:
     """
     Tool 5 -- The configured CPU and memory requests/limits for a pod.
 
@@ -224,7 +227,7 @@ def get_resource_limits(pod_name, namespace="default"):
     }
 
 
-def get_deployment_status(deployment_name, namespace="default"):
+def get_deployment_status(deployment_name: str, namespace: str = "default") -> dict | str:
     """
     Tool 6 -- Rollout status and replica counts for a deployment.
 
@@ -279,10 +282,10 @@ def restart_pod(pod_name: str, namespace: str = "default") -> dict:
     Standalone pods will not come back after deletion.
     """
     try:
-        core_api = client.CoreV1Api()
+        core, _ = _get_clients()
 
         # Ownership check -- refuse to delete standalone pods
-        pod = core_api.read_namespaced_pod(name=pod_name, namespace=namespace)
+        pod = core.read_namespaced_pod(name=pod_name, namespace=namespace)
         owner_refs = pod.metadata.owner_references
 
         if not owner_refs:
@@ -294,7 +297,7 @@ def restart_pod(pod_name: str, namespace: str = "default") -> dict:
                 "note": "Pod has no owner (standalone pod) -- deleting would destroy it permanently. Deploy via a Deployment instead."
             }
 
-        core_api.delete_namespaced_pod(name=pod_name, namespace=namespace)
+        core.delete_namespaced_pod(name=pod_name, namespace=namespace)
         return {
             "action": "restart_pod",
             "pod": pod_name,
@@ -313,7 +316,7 @@ def restart_pod(pod_name: str, namespace: str = "default") -> dict:
         }
 
 
-def scale_deployment(deployment_name, namespace="default", replicas=1):
+def scale_deployment(deployment_name: str, namespace: str = "default", replicas: int = 1) -> dict | str:
     """
     Tool 8 -- Change the replica count of a deployment.
 
@@ -343,49 +346,83 @@ def scale_deployment(deployment_name, namespace="default", replicas=1):
         return f"Error scaling deployment {deployment_name}: {e.status} {e.reason}"
 
 
-def rollback_deployment(deployment_name, namespace="default"):
+def rollback_deployment(deployment_name: str, namespace: str = "default") -> dict:
     """
     Tool 9 -- Roll a deployment back to its previous version.
 
-    Triggers `kubectl rollout undo` equivalent via the API.
-    This works by patching the deployment's revision annotation to point
-    to the previous ReplicaSet. K8s handles the actual rollback.
+    Finds all ReplicaSets owned by the deployment, sorts them by
+    revision number, and patches the deployment's pod template to
+    match the second-latest ReplicaSet (the previous revision).
 
-    Note: only works if there IS a previous version to roll back to.
-    A deployment with only one revision in its history cannot be rolled back.
+    This is the API equivalent of `kubectl rollout undo`.
+    Only works if there IS a previous version to roll back to.
     """
-    _, apps = _get_clients()
-
     try:
-        # Rollback is done by patching the deployment with a rollback annotation.
-        # This is the API equivalent of `kubectl rollout undo deployment/<name>`.
+        _, apps = _get_clients()
+
+        # List all ReplicaSets in the namespace
+        rs_list = apps.list_namespaced_replica_set(namespace=namespace)
+
+        # Filter to ReplicaSets owned by this deployment
+        owned_rs: list[tuple[int, object]] = []
+        for rs in rs_list.items:
+            if rs.metadata.owner_references:
+                for ref in rs.metadata.owner_references:
+                    if ref.kind == "Deployment" and ref.name == deployment_name:
+                        revision = int(
+                            rs.metadata.annotations.get(
+                                "deployment.kubernetes.io/revision", "0"
+                            )
+                        )
+                        owned_rs.append((revision, rs))
+
+        if len(owned_rs) < 2:
+            return {
+                "action": "rollback_deployment",
+                "deployment": deployment_name,
+                "namespace": namespace,
+                "result": "aborted",
+                "note": "No previous revision found -- nothing to rollback to.",
+            }
+
+        # Sort by revision descending; [0] = current, [1] = previous
+        owned_rs.sort(key=lambda x: x[0], reverse=True)
+        prev_revision, previous_rs = owned_rs[1]
+
+        # Convert the previous RS's pod template to a dict for patching
+        api_client = client.ApiClient()
+        template_dict = api_client.sanitize_for_serialization(
+            previous_rs.spec.template
+        )
+
+        # Patch the deployment to use the previous template
         apps.patch_namespaced_deployment(
             name=deployment_name,
             namespace=namespace,
-            body={
-                "metadata": {
-                    "annotations": {
-                        # This annotation tells K8s to roll back to the previous revision.
-                        "deployment.kubernetes.io/revision": None
-                    }
-                },
-                "spec": {
-                    "template": {
-                        "metadata": {
-                            "annotations": {
-                                "kubectl.kubernetes.io/restartedAt": None
-                            }
-                        }
-                    }
-                }
-            }
+            body={"spec": {"template": template_dict}},
         )
+
         return {
             "action": "rollback_deployment",
             "deployment": deployment_name,
             "namespace": namespace,
             "result": "initiated",
-            "note": "Rollback initiated -- check deployment status to confirm.",
+            "note": f"Rolled back to revision {prev_revision} -- check deployment status to confirm.",
         }
+
     except ApiException as e:
-        return f"Error rolling back deployment {deployment_name}: {e.status} {e.reason}"
+        return {
+            "action": "rollback_deployment",
+            "deployment": deployment_name,
+            "namespace": namespace,
+            "result": "error",
+            "note": f"{e.status} {e.reason}",
+        }
+    except Exception as e:
+        return {
+            "action": "rollback_deployment",
+            "deployment": deployment_name,
+            "namespace": namespace,
+            "result": "error",
+            "note": str(e),
+        }

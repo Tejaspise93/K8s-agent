@@ -46,6 +46,17 @@ class Config:
 # Loader
 # ---------------------------------------------------------------------------
 
+# Explicit type casters for each annotation type used in Config.
+# Safer than calling field.type(val) directly, which breaks for
+# complex types like Optional, bool, or list.
+_TYPE_CASTERS: dict[type, callable] = {
+    int:   int,
+    str:   str,
+    float: float,
+    bool:  lambda v: v if isinstance(v, bool) else str(v).lower() in ("true", "1", "yes"),
+}
+
+
 def _load_config() -> Config:
     """Read config.yaml and return a typed Config instance."""
     config_path = Path(__file__).parent.parent / "config.yaml"
@@ -60,26 +71,36 @@ def _load_config() -> Config:
         raw = yaml.safe_load(f) or {}
 
     try:
-        # Dynamically parse and cast fields based on dataclass annotations
         casted_data = {}
         for field in fields(Config):
+            if field.name not in raw:
+                raise KeyError(field.name)
             val = raw[field.name]
-            # Convert type if necessary (e.g., str to int)
-            casted_data[field.name] = field.type(val) if val is not None else val
-            
+            caster = _TYPE_CASTERS.get(field.type)
+            if caster and val is not None:
+                casted_data[field.name] = caster(val)
+            else:
+                casted_data[field.name] = val
+
         config_obj = Config(**casted_data)
 
-        assert config_obj.poll_interval > 0,        "poll_interval must be > 0"
-        assert config_obj.max_iterations > 0,       "max_iterations must be > 0"
-        assert config_obj.cooldown_max_attempts > 0, "cooldown_max_attempts must be > 0"
-        assert config_obj.max_tokens >= 100,        "max_tokens too low -- set at least 100"
+        # Validation -- explicit raises instead of assert (asserts are
+        # stripped when Python runs with -O, silently skipping checks).
+        if config_obj.poll_interval <= 0:
+            raise ValueError("poll_interval must be > 0")
+        if config_obj.max_iterations <= 0:
+            raise ValueError("max_iterations must be > 0")
+        if config_obj.cooldown_max_attempts <= 0:
+            raise ValueError("cooldown_max_attempts must be > 0")
+        if config_obj.max_tokens < 100:
+            raise ValueError("max_tokens too low -- set at least 100")
 
         return config_obj
-        
+
     except KeyError as e:
         raise KeyError(f"Missing required config key: {e}. Check config.yaml.")
     except (ValueError, TypeError) as e:
-        raise ValueError(f"Invalid value type in config.yaml: {e}")
+        raise ValueError(f"Invalid config value: {e}")
 
 
 # ---------------------------------------------------------------------------
